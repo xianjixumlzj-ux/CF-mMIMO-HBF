@@ -31,48 +31,31 @@ for bs_id in active_bs_ids:
     file_path = os.path.join(o1_28_folder, cir_file)
     print(f"加载基站{bs_id}的CIR文件：{file_path}")
     mat_data = loadmat(file_path)
-    cir_raw = mat_data["CIR_array_full"]
-    cir_length = cir_raw.size
+    cir_flat = mat_data["CIR_array_full"].flatten()
+    cir_length = len(cir_flat)
     print(f"CIR长度：{cir_length}")
 
-    if np.iscomplexobj(cir_raw):
-        cir_complex = cir_raw
-    elif cir_raw.ndim >= 3 and cir_raw.shape[-1] == 2:
-        cir_complex = cir_raw[..., 0] + 1j * cir_raw[..., 1]
-    else:
-        cir_flat = cir_raw.flatten()
-        # 修正为偶数长度并转为复数
-        if cir_flat.size % 2 != 0:
-            cir_flat = cir_flat[:-1]
-            print(f"修正为偶数长度：{cir_flat.size}")
-        cir_complex = cir_flat[::2] + 1j * cir_flat[1::2]
-    print(f"转为复数后形状：{cir_complex.shape}")
+    # 修正为偶数长度并转为复数
+    if cir_length % 2 != 0:
+        cir_flat = cir_flat[:-1]
+        cir_length = len(cir_flat)
+        print(f"修正为偶数长度：{cir_length}")
+    cir_complex = cir_flat[::2] + 1j * cir_flat[1::2]
+    print(f"转为复数后长度：{len(cir_complex)}")
 
     # 重塑为（样本数, 用户数, 天线数）
-    if cir_complex.ndim >= 3:
-        dims = list(cir_complex.shape)
-        if Mr not in dims:
-            raise ValueError(f"CIR维度中未找到Mr={Mr}，请检查CIR_array_full结构：{dims}")
-        mr_axis = dims.index(Mr)
-        remaining_axes = [i for i in range(len(dims)) if i != mr_axis]
-        if len(remaining_axes) < 2:
-            raise ValueError(f"CIR维度不足以解析(样本数, 用户数, 天线数)：{dims}")
-        sample_axis, user_axis = remaining_axes[:2]
-        if dims[user_axis] < K:
-            raise ValueError(f"CIR中用户数不足：K_available={dims[user_axis]}, K={K}")
-        cir_3d = np.moveaxis(cir_complex, [sample_axis, user_axis, mr_axis], [0, 1, 2])
-        target_samples = min(sample_num, cir_3d.shape[0])
-        cir_cropped = cir_3d[:target_samples, :K, :Mr]
-    else:
-        max_samples = cir_complex.size // (K * Mr)
-        target_samples = min(sample_num, max_samples)
-        if target_samples == 0:
-            raise ValueError(f"CIR长度不足以支持K/Mr设置：len={cir_complex.size}, needed={K * Mr}")
-        needed = target_samples * K * Mr
-        cir_3d = cir_complex[:needed].reshape(target_samples, K, Mr)
-        cir_cropped = cir_3d
+    target_samples = min(sample_num, len(cir_complex))
+    per_sample_len = len(cir_complex) // target_samples
+    if per_sample_len % Mr != 0:
+        raise ValueError(f"CIR长度无法按Mr={Mr}整除：per_sample_len={per_sample_len}")
+    K_available = per_sample_len // Mr
+    if K_available < K:
+        raise ValueError(f"CIR中用户数不足：K_available={K_available}, K={K}")
 
-    print(f"重塑为：（样本数={cir_cropped.shape[0]}, 用户数={cir_cropped.shape[1]}, 天线数={cir_cropped.shape[2]}）")
+    cir_2d = cir_complex[:target_samples * per_sample_len].reshape(target_samples, K_available, Mr)
+    print(f"重塑为：（样本数={target_samples}, 用户数={K_available}, 天线数={Mr}）")
+
+    cir_cropped = cir_2d[:target_samples, :K, :Mr]  # 截取用户数与天线数
     # 扩展为（样本数, 1, 用户数, 天线数），方便后续合并
     bs_channels.append(cir_cropped[:, np.newaxis, :, :])
 
