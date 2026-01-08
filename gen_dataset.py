@@ -73,7 +73,7 @@ for bs_id in active_bs_ids:
         cir_cropped = cir_3d
 
     print(f"重塑为：（样本数={cir_cropped.shape[0]}, 用户数={cir_cropped.shape[1]}, 天线数={cir_cropped.shape[2]}）")
-    # 扩展为（样本数, 1, 用数, 天线数），方便后续合并
+    # 扩展为（样本数, 1, 用户数, 天线数），便后续合并
     bs_channels.append(cir_cropped[:, np.newaxis, :, :])
 
 
@@ -129,6 +129,21 @@ os.makedirs(os.path.dirname(dataset_save_path), exist_ok=True)
 np.save(dataset_save_path, dataset)
 
 print(f"数据集生成成功！形状：{dataset.shape}")
+
+dataset_dir = os.path.dirname(dataset_save_path)
+dataset_md_path = os.path.join(dataset_dir, "DATASET.md")
+dataset_md_lines = [
+    f"Us = {Us}\n",
+    f"Mr = {Mr}\n",
+    "Nrf = 8\n",
+    f"N_BS = {N_BS_actual}\n",
+    f"K = {K}\n",
+    "Reserved = 0\n",
+    "Reserved2 = 0\n",
+    f"Noise_pwr = {noise_power_dbm}\n",
+]
+with open(dataset_md_path, "w", encoding="utf-8") as f:
+    f.writelines(dataset_md_lines)
 
 dataset = np.load(dataset_save_path)
 print("数据集形状：", dataset.shape)
