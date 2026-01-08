@@ -18,9 +18,16 @@ class Data_Reader(data.Dataset):
         print(colored('You select Extended dataset', 'cyan'))
         print(colored(filename, 'yellow'), 'is loading ... ')
         np_data = np.load(filename)
-        self.channel = np_data[:, 0:Us * Mr * N_BS]
-        self.RSSI_N = np_data[:, Us * Mr * N_BS:].real.astype(float)
-        self.n_samples = np_data.shape[0]
+        if isinstance(np_data, np.lib.npyio.NpzFile):
+            if "channel_flat" not in np_data or "rssi_flat" not in np_data:
+                raise ValueError("NPZ格式缺少channel_flat或rssi_flat字段，无法读取")
+            self.channel = np_data["channel_flat"]
+            self.RSSI_N = np_data["rssi_flat"].real.astype(float)
+            self.n_samples = self.channel.shape[0]
+        else:
+            self.channel = np_data[:, 0:Us * Mr * N_BS]
+            self.RSSI_N = np_data[:, Us * Mr * N_BS:].real.astype(float)
+            self.n_samples = np_data.shape[0]
 
     def __len__(self):
         return self.n_samples
