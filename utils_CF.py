@@ -14,19 +14,31 @@ import math
 
 # Database ####################################################################################################################
 class Data_Reader(data.Dataset):
-    def __init__(self, filename, Us, Mr, Nrf, K, N_BS):
+    def __init__(self, filename, Us, Mr, Nrf, K, N_BS, include_delay=False):
         print(colored('You select Extended dataset', 'cyan'))
         print(colored(filename, 'yellow'), 'is loading ... ')
         np_data = np.load(filename)
-        self.channel = np_data[:, 0:Us * Mr * N_BS]
-        self.RSSI_N = np_data[:, Us * Mr * N_BS:].real.astype(float)
+        channel_len = Us * Mr * N_BS
+        rssi_len = Us * N_BS * K
+        delay_len = Us * N_BS
+        self.channel = np_data[:, 0:channel_len]
+        self.RSSI_N = np_data[:, channel_len:channel_len + rssi_len].real.astype(float)
+        self.delay = None
+        if np_data.shape[1] >= channel_len + rssi_len + delay_len:
+            self.delay = np_data[:, channel_len + rssi_len:channel_len + rssi_len + delay_len].astype(float)
+        self.include_delay = include_delay
         self.n_samples = np_data.shape[0]
 
     def __len__(self):
         return self.n_samples
 
     def __getitem__(self, index):
-        return torch.tensor(self.channel[index]).type(torch.complex64), torch.tensor(self.RSSI_N[index])
+        channel = torch.tensor(self.channel[index]).type(torch.complex64)
+        rssi = torch.tensor(self.RSSI_N[index])
+        if self.include_delay and self.delay is not None:
+            delay = torch.tensor(self.delay[index]).type(torch.float32)
+            return channel, rssi, delay
+        return channel, rssi
 
 
 # readme reader for HBF initial parameters ####################################################################################
@@ -64,8 +76,8 @@ class Initialization_Model_Params(object):
         self.device = device
         self.dev_id = device_ids
 
-    def Data_Load(self):
-            DataBase = Data_Reader(''.join((self.DB_name, '/dataSet_130.npy')), self.Us, self.Mr, self.Nrf, self.K, self.N_BS)
+    def Data_Load(self, include_delay=False):
+        DataBase = Data_Reader(''.join((self.DB_name, '/dataSet_130.npy')), self.Us, self.Mr, self.Nrf, self.K, self.N_BS, include_delay=include_delay)
         return DataBase  # , uniq_dis_label
 
     def Code_Read(self):
@@ -114,15 +126,31 @@ class Loss_FCDP_Rate_Based(torch.nn.Module):
         return sum_rate.mean(), avg_rate.mean()
 
 class Loss_HCBF_Rate_Based(torch.nn.Module):
-    def __init__(self, Us, Mr, Nrf, N_BS, Noise_pwr):
+    def __init__(self, Us, Mr, Nrf, N_BS, Noise_pwr, enable_async=False, fc=28e9):
         super(Loss_HCBF_Rate_Based, self).__init__()
         self.Us = Us
         self.Mr = Mr
         self.Nrf = Nrf
         self.N_BS = N_BS
         self.noise_power = Noise_pwr
+        self.enable_async = enable_async
+        self.fc = fc
 
-    def rate_calculator(self, FDP, channel):
+    def _apply_async_phase(self, channel, delay, enable_async=None, fc=None):
+        if delay is None:
+            return channel
+        if enable_async is None:
+            enable_async = self.enable_async
+        if not enable_async:
+            return channel
+        if fc is None:
+            fc = self.fc
+        delay = delay.to(channel.device)
+        phi = torch.exp(-1j * 2 * math.pi * fc * delay)
+        return channel * phi.unsqueeze(-1)
+
+    def rate_calculator(self, FDP, channel, delay=None, enable_async=None, fc=None):
+        channel = self._apply_async_phase(channel, delay, enable_async, fc)
         W = torch.abs(torch.matmul(torch.conj(channel), FDP).sum(1)) ** 2
         SINR = torch.diagonal(W, dim1=1, dim2=2) / (torch.sum(W, 2) - torch.diagonal(W, dim1=1, dim2=2) + self.noise_power)
         userRates = torch.log2(1 + SINR)
@@ -130,7 +158,8 @@ class Loss_HCBF_Rate_Based(torch.nn.Module):
         avgRate = userRates.mean(1)
         return sumRate, avgRate, userRates
 
-    def rate_calculator_4d(self, FDP, channel):
+    def rate_calculator_4d(self, FDP, channel, delay=None, enable_async=None, fc=None):
+        channel = self._apply_async_phase(channel, delay, enable_async, fc)
         W = torch.abs(torch.matmul(torch.conj(channel), FDP).sum(5)) ** 2
         SINR = torch.diagonal(W, dim1=5, dim2=6) / (torch.sum(W, 6) - torch.diagonal(W, dim1=5, dim2=6) + self.noise_power)
         userRates = torch.log2(1 + SINR)
@@ -138,28 +167,43 @@ class Loss_HCBF_Rate_Based(torch.nn.Module):
         avgRate = userRates.mean(5)
         return sumRate, avgRate
 
-    def forward(self, W, channel, A):
+    def forward(self, W, channel, A, delay=None, enable_async=None, fc=None):
         HBF = torch.matmul(A.view(-1, len(channel), self.Nrf, self.Mr, self.N_BS).permute(0, 1, 4, 3, 2), W)
         HBF = HBF / torch.unsqueeze(torch.unsqueeze(torch.linalg.norm(HBF.flatten(2), dim=2).unsqueeze(2), 3), 4)
-        sum_rate, _ = Loss_HCBF_Rate_Based.rate_calculator_4d(self, HBF, channel)
+        sum_rate, _ = Loss_HCBF_Rate_Based.rate_calculator_4d(self, HBF, channel, delay=delay, enable_async=enable_async, fc=fc)
         return sum_rate.T
 
-    def evaluate_rate(self, W, channel, A):
+    def evaluate_rate(self, W, channel, A, delay=None, enable_async=None, fc=None):
         HBF = torch.matmul(A.view(len(channel), self.Nrf, self.Mr, self.N_BS).permute(0, 3, 2, 1), W)
         HBF = HBF / torch.unsqueeze(torch.unsqueeze(torch.linalg.norm(HBF.flatten(1), dim=1).unsqueeze(1), 2), 3)
-        sum_rate, avgRate = Loss_HCBF_Rate_Based.rate_calculator(self, HBF, channel)
+        sum_rate, avgRate = Loss_HCBF_Rate_Based.rate_calculator(self, HBF, channel, delay=delay, enable_async=enable_async, fc=fc)
         return sum_rate.mean(), avgRate.mean()
 
 class Loss_HCBF_S_Rate_Based(torch.nn.Module):
-    def __init__(self, Us, Mr, Nrf, N_BS, Noise_pwr):
+    def __init__(self, Us, Mr, Nrf, N_BS, Noise_pwr, enable_async=False, fc=28e9):
         super(Loss_HCBF_S_Rate_Based, self).__init__()
         self.Us = Us
         self.Mr = Mr
         self.Nrf = Nrf
         self.N_BS = N_BS
         self.noise_power = Noise_pwr
+        self.enable_async = enable_async
+        self.fc = fc
 
-    def forward(self, W, channel, A_s1, A_s2, A_s3, A_s4, sinr_3d):
+    def _apply_async_phase(self, channel, delay, enable_async=None, fc=None):
+        if delay is None:
+            return channel
+        if enable_async is None:
+            enable_async = self.enable_async
+        if not enable_async:
+            return channel
+        if fc is None:
+            fc = self.fc
+        delay = delay.to(channel.device)
+        phi = torch.exp(-1j * 2 * math.pi * fc * delay)
+        return channel * phi.unsqueeze(-1)
+
+    def forward(self, W, channel, A_s1, A_s2, A_s3, A_s4, sinr_3d, delay=None, enable_async=None, fc=None):
         A = torch.cat((A_s1.unsqueeze(1).unsqueeze(1).unsqueeze(1).repeat(1, sinr_3d.shape[1], sinr_3d.shape[2], sinr_3d.shape[3], 1, 1, 1),
                        A_s2.unsqueeze(0).unsqueeze(2).unsqueeze(2).repeat(sinr_3d.shape[0], 1, sinr_3d.shape[2], sinr_3d.shape[3], 1, 1, 1),
                        A_s3.unsqueeze(0).unsqueeze(0).unsqueeze(3).repeat(sinr_3d.shape[0], sinr_3d.shape[1], 1, sinr_3d.shape[3], 1, 1, 1),
@@ -172,14 +216,15 @@ class Loss_HCBF_S_Rate_Based(torch.nn.Module):
 
         power = torch.unsqueeze(torch.unsqueeze(torch.linalg.norm(HBF.flatten(5), dim=5).unsqueeze(5), 6), 7)
         HBF = HBF / power
+        channel = self._apply_async_phase(channel, delay, enable_async, fc)
         sinr_3d = Loss_HCBF_Rate_Based.rate_calculator_4d(self, HBF, channel)[0]
         return sinr_3d, power
 
-    def evaluate_rate(self, W, channel, A):
+    def evaluate_rate(self, W, channel, A, delay=None, enable_async=None, fc=None):
         HBF = torch.matmul(A.view(len(channel), self.N_BS, self.Nrf, self.Mr).permute(0, 1, 3, 2), W)
         Power = torch.unsqueeze(torch.unsqueeze(torch.linalg.norm(HBF.flatten(1), dim=1).unsqueeze(1), 2), 3)
         HBF = HBF / Power
-        sum_rate, avgRate, userRates = Loss_HCBF_Rate_Based.rate_calculator(self, HBF, channel)
+        sum_rate, avgRate, userRates = Loss_HCBF_Rate_Based.rate_calculator(self, HBF, channel, delay=delay, enable_async=enable_async, fc=fc)
         return sum_rate.mean(), avgRate.mean(), userRates, Power.mean()
 
 

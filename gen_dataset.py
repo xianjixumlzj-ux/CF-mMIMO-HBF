@@ -12,6 +12,33 @@ dataset_save_path = "dataSet4x64x8x4/130dB/dataSet_130.npy"
 params_file = "D:\\py_for_paper\\CF-mMIMO-HBF-main\\O1_28\\O1_28.params.mat"
 o1_28_folder = "D:\\py_for_paper\\CF-mMIMO-HBF-main\\O1_28"
 
+speed_of_light = 299792458.0
+
+
+def normalize_metric(metric_array, sample_num_target, k_target, label):
+    metric_array = np.array(metric_array)
+    if metric_array.ndim == 1:
+        if metric_array.size < sample_num_target * k_target:
+            raise ValueError(f"{label}长度不足以支持样本和用户数：len={metric_array.size}")
+        metric_array = metric_array[:sample_num_target * k_target].reshape(sample_num_target, k_target)
+        return metric_array
+
+    dims = list(metric_array.shape)
+    if k_target in dims:
+        k_axis = dims.index(k_target)
+        remaining_axes = [i for i in range(len(dims)) if i != k_axis]
+        if not remaining_axes:
+            raise ValueError(f"{label}维度不足以解析(样本数, 用户数)：{dims}")
+        sample_axis = remaining_axes[0]
+        metric_array = np.moveaxis(metric_array, [sample_axis, k_axis], [0, 1])
+        metric_array = metric_array[:sample_num_target, :k_target]
+        return metric_array
+
+    metric_flat = metric_array.reshape(-1)
+    if metric_flat.size < sample_num_target * k_target:
+        raise ValueError(f"{label}长度不足以支持样本和用户数：len={metric_flat.size}")
+    return metric_flat[:sample_num_target * k_target].reshape(sample_num_target, k_target)
+
 
 # ===================== 1. 加载参数文件 =====================
 params_data = loadmat(params_file)
@@ -26,6 +53,22 @@ for bs_id in active_bs_ids:
 
 # ===================== 2. 读取CIR文件并处理 =====================
 bs_channels = []
+bs_delays = []
+delay_key_candidates = [
+    "delay",
+    "delay_array_full",
+    "delays",
+    "tau",
+    "tau_array_full",
+]
+distance_key_candidates = [
+    "distance",
+    "distance_array_full",
+    "distance_2d",
+    "distance_3d",
+    "D_2D",
+    "D_3D",
+]
 for bs_id in active_bs_ids:
     cir_file = f"O1_28.{bs_id}.CIR.mat"
     file_path = os.path.join(o1_28_folder, cir_file)
@@ -76,6 +119,26 @@ for bs_id in active_bs_ids:
     # 扩展为（样本数, 1, 用户数, 天线数），便后续合并
     bs_channels.append(cir_cropped[:, np.newaxis, :, :])
 
+    delay_per_ue = None
+    for key in delay_key_candidates:
+        if key in mat_data:
+            delay_per_ue = normalize_metric(mat_data[key], cir_cropped.shape[0], K, f"Delay({key})")
+            print(f"基站{bs_id}使用延迟字段：{key}")
+            break
+
+    if delay_per_ue is None:
+        for key in distance_key_candidates:
+            if key in mat_data:
+                distance_per_ue = normalize_metric(mat_data[key], cir_cropped.shape[0], K, f"Distance({key})")
+                delay_per_ue = distance_per_ue / speed_of_light
+                print(f"基站{bs_id}使用距离字段：{key} -> delay")
+                break
+
+    if delay_per_ue is None:
+        print(f"基站{bs_id}未找到延迟/距离字段，delay将填充为0")
+
+    bs_delays.append(delay_per_ue)
+
 
 # ===================== 3. 合并信道并生成数据集 =====================
 # 合并后形状：（样本数, 基站数, 用户数, 天线数）
@@ -123,8 +186,18 @@ rssi_dbm = 10 * np.log10(rssi_matrix + 1e-12)
 rssi_norm = (rssi_dbm - np.mean(rssi_dbm)) / (np.std(rssi_dbm) + 1e-8)
 rssi_flat = rssi_norm.transpose(0, 2, 1, 3).reshape(sample_num_actual, -1)
 
+# 保存delay特征（服务用户）
+service_ue_delay = np.zeros((sample_num_actual, N_BS_actual, Us), dtype=np.float32)
+for i in range(sample_num_actual):
+    for b in range(N_BS_actual):
+        if bs_delays[b] is not None:
+            service_ue_delay[i, b, :] = bs_delays[b][i, top_us_ue_indices[i]].astype(np.float32)
+
+# 展平delay特征（顺序[Us, N_BS]）
+delay_flat = service_ue_delay.transpose(0, 2, 1).reshape(sample_num_actual, -1)
+
 # 保存最终数据集
-dataset = np.concatenate([channel_flat, rssi_flat], axis=1)
+dataset = np.concatenate([channel_flat, rssi_flat, delay_flat], axis=1)
 os.makedirs(os.path.dirname(dataset_save_path), exist_ok=True)
 np.save(dataset_save_path, dataset)
 
@@ -149,5 +222,7 @@ dataset = np.load(dataset_save_path)
 print("数据集形状：", dataset.shape)
 channel_len = Us * Mr * N_BS_actual
 rssi_len = Us * N_BS_actual * K
-print("信道长度：", dataset.shape[1] - rssi_len)
+delay_len = Us * N_BS_actual
+print("信道长度：", channel_len)
 print("RSSI长度：", rssi_len)
+print("Delay长度：", delay_len)
