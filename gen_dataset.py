@@ -11,6 +11,13 @@ noise_power_dbm = 130
 dataset_save_path = "dataSet4x64x8x4/130dB/dataSet_130.npy"
 params_file = "D:\\py_for_paper\\CF-mMIMO-HBF-main\\O1_28\\O1_28.params.mat"
 o1_28_folder = "D:\\py_for_paper\\CF-mMIMO-HBF-main\\O1_28"
+speed_range_mps = (0.5, 1.5)
+time_step_s = 0.02
+handover_threshold_db = -90
+handover_hysteresis_db = 3
+fc_hz = 28e9
+c_mps = 299792458
+trajectory_type = "deepmimo_o1_28_snapshots"
 
 
 # ===================== 1. 加载参数文件 =====================
@@ -138,6 +145,14 @@ dataset_md_lines = [
     "Nrf = 8\n",
     f"N_BS = {N_BS_actual}\n",
     f"K = {K}\n",
+    f"Time_steps = {sample_num_actual}\n",
+    f"Trajectory = {trajectory_type}\n",
+    f"Speed_range_mps = {speed_range_mps[0]}-{speed_range_mps[1]}\n",
+    f"Time_step_s = {time_step_s}\n",
+    f"Handover_threshold_db = {handover_threshold_db}\n",
+    f"Handover_hysteresis_db = {handover_hysteresis_db}\n",
+    f"fc_hz = {fc_hz}\n",
+    f"c_mps = {c_mps}\n",
     "Reserved = 0\n",
     "Reserved2 = 0\n",
     f"Noise_pwr = {noise_power_dbm}\n",

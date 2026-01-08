@@ -20,6 +20,15 @@ A realistic ray-tracing channel model is considered to evaluate the proposed sol
 ## Dataset
 The dataset where 4 APs with 64 antenna and 8 RF chains serving 4 single antenna users. We consider BS number 4,5,8,9 is active and other information is in the paper. The dataset name should be "dataSet_130.npy". The RSSI value must be normalized and the order of data in .npy can be found in codes (import .npy).
 
+### 移动场景与异步接收
+数据集生成脚本 `gen_dataset.py` 支持移动场景参数，包括速度范围、时间步长、切换阈值/滞回、以及载频与光速配置。每个时间步对应 DeepMIMO 快照，脚本在 `DATASET.md` 中记录时间步数、轨迹类型与移动参数，并在 `DATASET.json` 中写入可供解析的 metadata（如 `time_steps`、`trajectory_type`、`fc_hz`）。
+
+运行入口：
+
+```bash
+python gen_dataset.py
+```
+
 ## Requirements
 1. torch 1.8.0 (Support Complex Tensor)
 2. numpy 1.19.2

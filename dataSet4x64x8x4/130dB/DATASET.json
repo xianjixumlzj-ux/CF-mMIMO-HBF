@@ -1,0 +1,11 @@
+{
+  "time_steps": 135,
+  "trajectory_type": "deepmimo_o1_28_snapshots",
+  "speed_range_mps": [0.5, 1.5],
+  "time_step_s": 0.02,
+  "handover_threshold_db": -90,
+  "handover_hysteresis_db": 3,
+  "fc_hz": 28000000000.0,
+  "c_mps": 299792458,
+  "active_bs_ids": [4, 5, 8, 9]
+}
