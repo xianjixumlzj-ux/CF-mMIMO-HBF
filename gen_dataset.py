@@ -134,13 +134,13 @@ print(f"数据集生成成功！形状：{dataset.shape}")
 dataset_dir = os.path.dirname(dataset_save_path)
 dataset_md_path = os.path.join(dataset_dir, "DATASET.md")
 dataset_md_lines = [
-    "# DATASET\n",
     f"Us = {Us}\n",
     f"Mr = {Mr}\n",
     "Nrf = 8\n",
     f"N_BS = {N_BS_actual}\n",
     f"K = {K}\n",
     "Reserved = 0\n",
+    "Reserved2 = 0\n",
     f"Noise_pwr = {noise_power_dbm}\n",
 ]
 with open(dataset_md_path, "w", encoding="utf-8") as f:
