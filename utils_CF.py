@@ -17,16 +17,39 @@ class Data_Reader(data.Dataset):
     def __init__(self, filename, Us, Mr, Nrf, K, N_BS):
         print(colored('You select Extended dataset', 'cyan'))
         print(colored(filename, 'yellow'), 'is loading ... ')
-        np_data = np.load(filename)
-        self.channel = np_data[:, 0:Us * Mr * N_BS]
-        self.RSSI_N = np_data[:, Us * Mr * N_BS:].real.astype(float)
-        self.n_samples = np_data.shape[0]
+        np_data = np.load(filename, allow_pickle=True)
+        self.assoc = None
+        self.assoc_feature_dim = 0
+        channel_len = Us * Mr * N_BS
+        rssi_len = Us * N_BS * K
+
+        if isinstance(np_data, np.lib.npyio.NpzFile):
+            self.channel = np_data['channel']
+            self.RSSI_N = np_data['rssi'].real.astype(float)
+            if 'assoc' in np_data:
+                self.assoc = np_data['assoc'].astype(float)
+        else:
+            self.channel = np_data[:, 0:channel_len]
+            self.RSSI_N = np_data[:, channel_len:channel_len + rssi_len].real.astype(float)
+            if np_data.shape[1] > channel_len + rssi_len:
+                self.assoc = np_data[:, channel_len + rssi_len:].astype(float)
+
+        if self.assoc is not None:
+            assoc_flat = self.assoc.reshape(self.assoc.shape[0], -1)
+            self.assoc_feature_dim = assoc_flat.shape[1] // (Us * N_BS)
+
+        self.n_samples = self.channel.shape[0]
 
     def __len__(self):
         return self.n_samples
 
     def __getitem__(self, index):
-        return torch.tensor(self.channel[index]).type(torch.complex64), torch.tensor(self.RSSI_N[index])
+        channel = torch.tensor(self.channel[index]).type(torch.complex64)
+        rssi = torch.tensor(self.RSSI_N[index])
+        if self.assoc is None:
+            return channel, rssi
+        assoc = torch.tensor(self.assoc[index]).float()
+        return channel, rssi, assoc
 
 
 # readme reader for HBF initial parameters ####################################################################################
@@ -65,7 +88,7 @@ class Initialization_Model_Params(object):
         self.dev_id = device_ids
 
     def Data_Load(self):
-            DataBase = Data_Reader(''.join((self.DB_name, '/dataSet_130.npy')), self.Us, self.Mr, self.Nrf, self.K, self.N_BS)
+        DataBase = Data_Reader(''.join((self.DB_name, '/dataSet_130.npy')), self.Us, self.Mr, self.Nrf, self.K, self.N_BS)
         return DataBase  # , uniq_dis_label
 
     def Code_Read(self):

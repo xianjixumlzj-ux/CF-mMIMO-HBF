@@ -109,6 +109,50 @@ my_dataloader = th.utils.data.DataLoader(train_dataset, batch_size=batch_size, s
 my_testloader = th.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
 ###############################################################################
+# Association handling
+###############################################################################
+assoc_feature_dim = int(getattr(DataBase, 'assoc_feature_dim', 0))
+handover_weight = 1.0
+if assoc_feature_dim > 0:
+    n_input = Us * N_BS * (K_limited + assoc_feature_dim)
+
+def unpack_batch(batch):
+    if len(batch) == 3:
+        return batch[0], batch[1], batch[2]
+    if len(batch) == 2:
+        return batch[0], batch[1], None
+    raise ValueError('Unexpected batch format')
+
+def append_assoc_features(rssi, assoc):
+    if assoc is None:
+        return rssi
+    assoc_flat = assoc.view(assoc.shape[0], -1).float()
+    return th.cat((rssi.float(), assoc_flat), dim=1)
+
+def reshape_assoc(assoc, n_bs, us):
+    if assoc is None:
+        return None
+    return assoc.view(assoc.shape[0], n_bs, us, -1).float()
+
+def current_assoc_mask(assoc, n_bs, us):
+    assoc_seq = reshape_assoc(assoc, n_bs, us)
+    if assoc_seq is None:
+        return None
+    if assoc_seq.shape[-1] > 1:
+        assoc_current = assoc_seq[..., -1]
+    else:
+        assoc_current = assoc_seq.squeeze(-1)
+    return assoc_current
+
+def compute_handover_penalty(assoc, n_bs, us, weight):
+    assoc_seq = reshape_assoc(assoc, n_bs, us)
+    if assoc_seq is None or assoc_seq.shape[-1] < 2:
+        return th.tensor(0.0, device=device)
+    assoc_idx = assoc_seq.argmax(dim=1)
+    switches = (assoc_idx[:, :, 1:] != assoc_idx[:, :, :-1]).sum(dim=2).float()
+    return switches.mean() * weight
+
+###############################################################################
 # Networks Arch
 ###############################################################################
 Networks_Main_Menu = Networks_activations(DB_name,
@@ -117,6 +161,7 @@ Networks_Main_Menu = Networks_activations(DB_name,
                                         Nrf,
                                         K,
                                         K_limited,
+                                        assoc_feature_dim,
                                         N_BS,
                                         Noise_pwr,
                                         Net_MT_Type,
@@ -149,11 +194,18 @@ scheduler_MT = ReduceLROnPlateau(optimizer_CF, mode='max', factor=0.1, patience=
 if BF_approach == 'FLP_W_FD':
     criterium_clas_4d = Loss_HCBF_S_Rate_Based(Us, Mr, Nrf, N_BS, Noise_pwr).to(device)
     for i in range(1, epoch_size):
-        for k, (channel, RSSI) in enumerate(my_dataloader):
+        for k, batch in enumerate(my_dataloader):
+            channel, RSSI, assoc = unpack_batch(batch)
+            RSSI = append_assoc_features(RSSI, assoc)
 
             Inputs_Reg = Networks_Main_Menu.Inp_MT(RSSI)
 
             channel = channel.view(-1, Us, Mr, N_BS).permute(0, 3, 1, 2).to(device)
+            assoc_mask = current_assoc_mask(assoc, N_BS, Us)
+            if assoc_mask is not None:
+                assoc_mask = assoc_mask.to(device).unsqueeze(-1)
+                channel = channel * assoc_mask
+                Inputs_Reg = Inputs_Reg * assoc_mask
 
             # Set gradient to 0.
             optimizer_CF.zero_grad()
@@ -198,11 +250,19 @@ if BF_approach == 'FLP_W_FD':
                     avgRate_predicted_HCF = []
                     UserRate_predicted_HCF = []
                     power = []
-                    for (tchannel, tRSSI) in my_testloader:
+                    handover_penalties = []
+                    for batch in my_testloader:
+                        tchannel, tRSSI, tassoc = unpack_batch(batch)
+                        tRSSI = append_assoc_features(tRSSI, tassoc)
 
                         testInputs_Reg = Networks_Main_Menu.Inp_MT(tRSSI)
 
                         T_channel = tchannel.view(-1, Us, Mr, N_BS).permute(0, 3, 1, 2).to(device)
+                        assoc_mask = current_assoc_mask(tassoc, N_BS, Us)
+                        if assoc_mask is not None:
+                            assoc_mask = assoc_mask.to(device).unsqueeze(-1)
+                            T_channel = T_channel * assoc_mask
+                            testInputs_Reg = testInputs_Reg * assoc_mask
 
                         # Forward pass reg
                         Model_CF.eval()
@@ -232,28 +292,38 @@ if BF_approach == 'FLP_W_FD':
                         sumRate_predicted_HCF.append(Temp[0])
                         avgRate_predicted_HCF.append(Temp[1])
                         UserRate_predicted_HCF.append(Temp[2])
+                        handover_penalties.append(compute_handover_penalty(tassoc, N_BS, Us, handover_weight).item())
 
                 # Final Value for rate
                 sumRATE_Predicted_HCF = sum(sumRate_predicted_HCF) / len(sumRate_predicted_HCF)
                 avgRATE_Predicted_HCF = sum(avgRate_predicted_HCF) / len(avgRate_predicted_HCF)
+                handover_penalty = sum(handover_penalties) / len(handover_penalties) if handover_penalties else 0.0
 
                 scheduler_MT.step(sumRATE_Predicted_HCF)
 
                 # Plots on Neptun Rate
                 npt.send_metric('Sum Rate Value HBF', sumRATE_Predicted_HCF)
                 npt.send_metric('Average Rate Value HBF', avgRATE_Predicted_HCF)
+                npt.send_metric('Handover penalty', handover_penalty)
 
-                print('Iter:==>{:3d} Loss_Class:{:.3f} sumRate_pre_HCBF:{:.2f} avgRate_pre_HCBF:{:.2f}'.
-                    format(i, loss_clas, sumRATE_Predicted_HCF, avgRATE_Predicted_HCF))
+                print('Iter:==>{:3d} Loss_Class:{:.3f} sumRate_pre_HCBF:{:.2f} avgRate_pre_HCBF:{:.2f} handover_penalty:{:.2f}'.
+                    format(i, loss_clas, sumRATE_Predicted_HCF, avgRATE_Predicted_HCF, handover_penalty))
 
 elif BF_approach == 'FLP_W_PD':
     criterium_clas_4d = Loss_HCBF_S_Rate_Based(Us, Mr, Nrf, N_BS, Noise_pwr).to(device)
     for i in range(1, epoch_size):
-        for k, (channel, RSSI) in enumerate(my_dataloader):
+        for k, batch in enumerate(my_dataloader):
+            channel, RSSI, assoc = unpack_batch(batch)
+            RSSI = append_assoc_features(RSSI, assoc)
 
             Inputs_Reg = Networks_Main_Menu.Inp_MT(RSSI)
 
             channel = channel.view(-1, Us, Mr, N_BS).permute(0, 3, 1, 2).to(device)
+            assoc_mask = current_assoc_mask(assoc, N_BS, Us)
+            if assoc_mask is not None:
+                assoc_mask = assoc_mask.to(device).unsqueeze(-1)
+                channel = channel * assoc_mask
+                Inputs_Reg = Inputs_Reg * assoc_mask
 
             # Set gradient to 0.
             optimizer_CF.zero_grad()
@@ -295,18 +365,26 @@ elif BF_approach == 'FLP_W_PD':
                         summary(Model_CF, (n_input,))
                     elif Net_MT_Type in [2, 3]:
                         if SSB_Type == 'parallel':
-                            summary(Model_CF, (1, Us, K_limited))
+                            summary(Model_CF, (1, Us, K_limited + assoc_feature_dim))
                         else:
-                            summary(Model_CF, (N_BS, Us, K_limited))
+                            summary(Model_CF, (N_BS, Us, K_limited + assoc_feature_dim))
                 # iterate through test dataset
                 with th.no_grad():
                     sumRate_predicted_HCF = []
                     avgRate_predicted_HCF = []
-                    for (tchannel, tRSSI) in my_testloader:
+                    handover_penalties = []
+                    for batch in my_testloader:
+                        tchannel, tRSSI, tassoc = unpack_batch(batch)
+                        tRSSI = append_assoc_features(tRSSI, tassoc)
 
                         testInputs_Reg = Networks_Main_Menu.Inp_MT(tRSSI)
 
                         T_channel = tchannel.view(-1, Us, Mr, N_BS).permute(0, 3, 1, 2).to(device)
+                        assoc_mask = current_assoc_mask(tassoc, N_BS, Us)
+                        if assoc_mask is not None:
+                            assoc_mask = assoc_mask.to(device).unsqueeze(-1)
+                            T_channel = T_channel * assoc_mask
+                            testInputs_Reg = testInputs_Reg * assoc_mask
 
                         # Forward pass reg
                         Model_CF.eval()
@@ -330,19 +408,22 @@ elif BF_approach == 'FLP_W_PD':
 
                         sumRate_predicted_HCF.append(criterium_clas_4d.evaluate_rate(w_pre.permute(0, 1, 3, 2), T_channel, An_Pred)[0])
                         avgRate_predicted_HCF.append(criterium_clas_4d.evaluate_rate(w_pre.permute(0, 1, 3, 2), T_channel, An_Pred)[1])
+                        handover_penalties.append(compute_handover_penalty(tassoc, N_BS, Us, handover_weight).item())
 
                 # Final Value for rate
                 sumRATE_Predicted_HCF = sum(sumRate_predicted_HCF) / len(sumRate_predicted_HCF)
                 avgRATE_Predicted_HCF = sum(avgRate_predicted_HCF) / len(avgRate_predicted_HCF)
+                handover_penalty = sum(handover_penalties) / len(handover_penalties) if handover_penalties else 0.0
 
                 scheduler_MT.step(sumRATE_Predicted_HCF)
 
                 # Plots on Neptun Rate
                 npt.send_metric('Sum Rate Value HBF', sumRATE_Predicted_HCF)
                 npt.send_metric('Average Rate Value HBF', avgRATE_Predicted_HCF)
+                npt.send_metric('Handover penalty', handover_penalty)
 
-                print('Iter:==>{:3d} Loss_Class:{:.3f} sumRate_pre_HCBF:{:.2f} avgRate_pre_HCBF:{:.2f}'.
-                    format(i, loss_clas, sumRATE_Predicted_HCF, avgRATE_Predicted_HCF))
+                print('Iter:==>{:3d} Loss_Class:{:.3f} sumRate_pre_HCBF:{:.2f} avgRate_pre_HCBF:{:.2f} handover_penalty:{:.2f}'.
+                    format(i, loss_clas, sumRATE_Predicted_HCF, avgRATE_Predicted_HCF, handover_penalty))
 
 else:
     raise Exception('BF_approach is wrong !!')
