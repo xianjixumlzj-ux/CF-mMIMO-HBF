@@ -39,6 +39,17 @@ class Data_Reader(data.Dataset):
             self.assoc_feature_dim = assoc_flat.shape[1] // (Us * N_BS)
 
         self.n_samples = self.channel.shape[0]
+        np_data = np.load(filename)
+        if isinstance(np_data, np.lib.npyio.NpzFile):
+            if "channel_flat" not in np_data or "rssi_flat" not in np_data:
+                raise ValueError("NPZ格式缺少channel_flat或rssi_flat字段，无法读取")
+            self.channel = np_data["channel_flat"]
+            self.RSSI_N = np_data["rssi_flat"].real.astype(float)
+            self.n_samples = self.channel.shape[0]
+        else:
+            self.channel = np_data[:, 0:Us * Mr * N_BS]
+            self.RSSI_N = np_data[:, Us * Mr * N_BS:].real.astype(float)
+            self.n_samples = np_data.shape[0]
 
     def __len__(self):
         return self.n_samples

@@ -9,8 +9,18 @@ K = 32  # 目标用户数
 sample_num = 135  # 目标样本数
 noise_power_dbm = 130
 dataset_save_path = "dataSet4x64x8x4/130dB/dataSet_130.npy"
+dataset_save_path_npz = "dataSet4x64x8x4/130dB/dataSet_130_time.npz"
 params_file = "D:\\py_for_paper\\CF-mMIMO-HBF-main\\O1_28\\O1_28.params.mat"
 o1_28_folder = "D:\\py_for_paper\\CF-mMIMO-HBF-main\\O1_28"
+time_steps = 10
+area_size = 100.0
+trajectory_mode = "random_walk"  # "random_walk" or "linear"
+step_std = 1.0
+pathloss_exp = 3.5
+pathloss_ref = 1.0
+assoc_threshold_db = -110.0
+assoc_hysteresis_db = 3.0
+rng_seed = 42
 
 
 # ===================== 1. 加载参数文件 =====================
@@ -129,6 +139,69 @@ os.makedirs(os.path.dirname(dataset_save_path), exist_ok=True)
 np.save(dataset_save_path, dataset)
 
 print(f"数据集生成成功！形状：{dataset.shape}")
+
+# ===================== 4. 轨迹/时间步数据生成 =====================
+rng = np.random.default_rng(rng_seed)
+ap_angles = np.linspace(0, 2 * np.pi, N_BS_actual, endpoint=False)
+ap_radius = area_size * 0.45
+ap_center = np.array([area_size / 2, area_size / 2])
+ap_positions = ap_center + ap_radius * np.stack([np.cos(ap_angles), np.sin(ap_angles)], axis=1)
+
+ue_positions = np.zeros((sample_num_actual, time_steps, K_actual, 2), dtype=np.float32)
+ue_positions[:, 0, :, :] = rng.uniform(0, area_size, size=(sample_num_actual, K_actual, 2))
+if trajectory_mode == "linear":
+    ue_velocity = rng.uniform(-step_std, step_std, size=(sample_num_actual, K_actual, 2))
+    for t in range(1, time_steps):
+        ue_positions[:, t, :, :] = ue_positions[:, t - 1, :, :] + ue_velocity
+        ue_positions[:, t, :, :] = np.clip(ue_positions[:, t, :, :], 0, area_size)
+else:
+    for t in range(1, time_steps):
+        steps = rng.normal(0, step_std, size=(sample_num_actual, K_actual, 2))
+        ue_positions[:, t, :, :] = ue_positions[:, t - 1, :, :] + steps
+        ue_positions[:, t, :, :] = np.clip(ue_positions[:, t, :, :], 0, area_size)
+
+diff = ue_positions[:, :, np.newaxis, :, :] - ap_positions[np.newaxis, np.newaxis, :, np.newaxis, :]
+distance = np.linalg.norm(diff, axis=-1).astype(np.float32)
+distance_safe = np.maximum(distance, pathloss_ref)
+pathloss_linear = (pathloss_ref / distance_safe) ** pathloss_exp
+
+channel_time = channel_matrix[:, np.newaxis, :, :, :] * np.sqrt(pathloss_linear[..., np.newaxis])
+rx_power = np.mean(np.abs(channel_time) ** 2, axis=4)
+rssi_db = 10 * np.log10(rx_power + 1e-12)
+
+assoc_idx = np.zeros((sample_num_actual, time_steps, K_actual), dtype=np.int64)
+assoc_idx[:, 0, :] = np.argmax(rssi_db[:, 0, :, :], axis=1)
+for t in range(1, time_steps):
+    best_idx = np.argmax(rssi_db[:, t, :, :], axis=1)
+    for s in range(sample_num_actual):
+        for u in range(K_actual):
+            current = assoc_idx[s, t - 1, u]
+            best = best_idx[s, u]
+            if (rssi_db[s, t, best, u] - rssi_db[s, t, current, u] >= assoc_hysteresis_db) or (
+                rssi_db[s, t, current, u] < assoc_threshold_db
+            ):
+                assoc_idx[s, t, u] = best
+            else:
+                assoc_idx[s, t, u] = current
+
+assoc = np.zeros((sample_num_actual, time_steps, N_BS_actual, K_actual), dtype=np.int8)
+for s in range(sample_num_actual):
+    for t in range(time_steps):
+        assoc[s, t, assoc_idx[s, t, :], np.arange(K_actual)] = 1
+
+np.savez(
+    dataset_save_path_npz,
+    channel_time=channel_time.astype(np.complex64),
+    assoc=assoc,
+    distance=distance,
+    channel_flat=channel_flat.astype(np.complex64),
+    rssi_flat=rssi_flat.astype(np.float32),
+    rssi_db=rssi_db.astype(np.float32),
+    ap_positions=ap_positions.astype(np.float32),
+    ue_positions=ue_positions.astype(np.float32),
+)
+
+print(f"时间序列数据集生成成功！channel_time形状：{channel_time.shape}，assoc形状：{assoc.shape}")
 
 dataset_dir = os.path.dirname(dataset_save_path)
 dataset_md_path = os.path.join(dataset_dir, "DATASET.md")
